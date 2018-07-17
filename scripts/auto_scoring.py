@@ -16,6 +16,11 @@ import logging
 from PIL.Image import DecompressionBombWarning
 import subprocess
 
+flags = tf.app.flags
+flags.DEFINE_string('test_dir', '', 'The directory with all the testing images and their xml annotation files.')
+flags.DEFINE_string('model_file', '', 'The path to the protobuf file that represents the model you want to score.')
+flags.DEFINE_string('visualize_path', '', 'The directory where you want to put all the visualizations that the machine did wrong on.')
+FLAGS = flags.FLAGS
 
 class Result:
     def __init__(self, accurate, true_box):
@@ -72,7 +77,7 @@ class TFOutput:
         self.sheet_num = None
         self.num_confidence = 0.0
         self.num_label_confidence = 0.0
-        self.rotation_angle = None
+        self.rotation_angle = 0.0
         self.rotation_confidence = 0.0
         self.info_confidence = 0.0
         self.boxes_json = {}
@@ -101,6 +106,30 @@ categories = label_map_util.convert_label_map_to_categories(label_map, max_num_c
 category_index = label_map_util.create_category_index(categories)
 
 ### Helper code
+
+def rotate_box(height, width, xmin, ymin, xmax, ymax, theta):
+    if abs(theta) == 0:
+        new_xmin = xmin
+        new_xmax = xmax
+        new_ymin = ymin
+        new_ymax = ymax
+    if abs(theta) == 270:
+        new_xmin = height - ymax
+        new_xmax = (ymax - ymin) + new_xmin
+        new_ymin = xmin
+        new_ymax = xmax
+    elif abs(theta) == 180:
+        new_xmin = width - xmax
+        new_xmax = (xmax - xmin) + new_xmin
+        new_ymin = height - ymax
+        new_ymax = (ymax - ymin) + new_ymin
+    elif abs(theta) == 90:
+        new_xmin = ymin
+        new_xmax = ymax
+        new_ymin = width - xmax
+        new_ymax = width - xmin
+
+    return [new_xmin,new_ymin, new_xmax,new_ymax]
 
 def load_image_into_numpy_array(image):
   im_width = image.width
@@ -185,10 +214,13 @@ def scan_sheet(sess, image_path, xml_path, visualize_path, image_tensor, detecti
           image = image.rotate(270, expand=True)
 
 
-      logging.info('Rescanning due to rotation of {}'.format(tf_output.rotation_angle))
+      logging.info('Rescanning ' + just_file_name + ' due to rotation of {}'.format(tf_output.rotation_angle))
       tf_output = TFOutput()
       process_image(sess=sess, image=image, filename=file_name, image_tensor=image_tensor, detection_boxes=detection_boxes,
                     detection_scores=detection_scores, detection_classes=detection_classes, num_detections=num_detections, tf_output=tf_output)
+
+
+   ## Do the rotation of machine generated annotations here!
 
     entry = {'filename': tf_output.filename,
           'sheetnum': tf_output.sheet_num,
@@ -208,16 +240,22 @@ def scan_sheet(sess, image_path, xml_path, visualize_path, image_tensor, detecti
     total_count = 0
     correct_count = 0
 
+    print (" ")
+    print ("Evaluation for " + just_file_name)
+    print (" ")
+
     newTree = Annotation_Tree(os.path.basename(image_path))
     sheetnumResult = check_accuracy(xml_root, tf_output.boxes_json['sheetnum'], "sheetnum")
     if sheetnumResult.accurate:
         correct_count += 1
     else:
-        newTree.add_annotation("model_predicted_sheetnum", tf_output.boxes_json['sheetnum'])
-        newTree.add_annotation("human_labeled_sheetnum", sheetnumResult.true_box)
+        if sheetnumResult.true_box != [0, 0, 0, 0]:
+            newTree.add_annotation("model_predicted_sheetnum", tf_output.boxes_json['sheetnum'])
+            newTree.add_annotation("human_labeled_sheetnum", sheetnumResult.true_box)
 
     if sheetnumResult.true_box == [0, 0, 0, 0]:
-        print ("found no answer")
+        print ("No human labeled sheet_num for this image")
+        print (" ")
     else:
         total_count += 1
 
@@ -226,11 +264,13 @@ def scan_sheet(sess, image_path, xml_path, visualize_path, image_tensor, detecti
     if sheettitleResult.accurate:
         correct_count += 1
     else:
-        newTree.add_annotation("model_predicted_sheettitle", tf_output.boxes_json['sheettitle'])
-        newTree.add_annotation("human_labeled_sheettitle", sheettitleResult.true_box)
+        if sheettitleResult.true_box != [0, 0, 0, 0]:
+            newTree.add_annotation("model_predicted_sheettitle", tf_output.boxes_json['sheettitle'])
+            newTree.add_annotation("human_labeled_sheettitle", sheettitleResult.true_box)
 
     if sheettitleResult.true_box == [0, 0, 0, 0]:
-        print ("found no answer")
+        print ("No human labeled sheet_title for this image")
+        print (" ")
     else:
         total_count += 1
 
@@ -242,12 +282,12 @@ def scan_sheet(sess, image_path, xml_path, visualize_path, image_tensor, detecti
         subprocess.call(cmd, shell=True)
 
 
-    logging.info("File {} results: {}".format(tf_output.filename, entry))
+    # logging.info("File {} results: {}".format(tf_output.filename, entry))
+
 
     return (correct_count, total_count)
 
 def process_image(sess, image, filename, image_tensor, detection_boxes, detection_scores, detection_classes, num_detections, tf_output):
-    # image_np = load_image_into_numpy_array(image)
 
     image_np_expanded = np.expand_dims(image, axis=0)
 
@@ -293,7 +333,10 @@ def get_results(params):
     xmin = int(image.size[0]*boxes[0,index][1]) #xmin
     ymax = int(image.size[1]*boxes[0,index][2]) #ymax
     xmax = int(image.size[0]*boxes[0,index][3]) #xmax
-    area=(xmin,ymin,xmax,ymax)
+
+
+    area = rotate_box(image.size[1], image.size[0], xmin, ymin, xmax, ymax, int(tf_output.rotation_angle))
+    # area=(xmin,ymin,xmax,ymax)
 
 
 
@@ -355,19 +398,20 @@ def check_accuracy(xml_root, area, label):
     result = float(area[0]) > float(answer[0]) * 0.95 and float(area[1]) > float(answer[1]) * 0.95 and \
              float(area[2]) < float(answer[2]) * 1.05 and float(area[3]) < float(answer[3]) * 1.05
 
-    print ("label:", label)
-    print ("answer:", answer)
-    print ("area:", area)
-    print (result)
+    print ('class: ' + str(label))
+    print ("human labeled box: " + str(answer))
+    print ("machine predicted box: " + str(area))
+    print ("Succeeded" if result else "Failed")
+    print (" ")
 
     return Result(result, answer)
 
-def main(sourcefile, session, modelpath, visualize_path):
+def main(sourcefile, modelpath, visualize_path):
     global source_file
     source_file = sourcefile
-
-    global _session
-    _session = session
+    #
+    # global _session
+    # _session = session
 
     logging.getLogger().setLevel(logging.INFO)
 
@@ -416,4 +460,4 @@ def main(sourcefile, session, modelpath, visualize_path):
         print (str(total_correct) + "/" + str(total_boxes) + " success")
 
 
-main("./just-test", "", "./data_mike-and-pootie-model-35536_frozen_inference_graph.pb", "/home/edward/Downloads/test-viz")
+main(FLAGS.test_dir, FLAGS.model_file, FLAGS.visualize_path)
