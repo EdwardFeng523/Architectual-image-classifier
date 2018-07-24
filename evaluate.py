@@ -6,8 +6,8 @@ import os
 import tensorflow as tf
 
 flags = tf.app.flags
-flags.DEFINE_string('source_dir', '/home/edward/Documents/tensorflow-image-classifier/right_test/', 'Path to the source images for testing')
-flags.DEFINE_string('correct_class', 'spec', 'The correct class name for these images')
+flags.DEFINE_string('source_dir', '/home/edward/Documents/architectual-image-classifier/right_test/', 'Path to the source images for testing')
+flags.DEFINE_string('correct_class', 'right', 'The correct class name for these images')
 flags.DEFINE_integer('num_classes', 4, 'Number of classes in this classification')
 FLAGS = flags.FLAGS
 
